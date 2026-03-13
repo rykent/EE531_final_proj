@@ -9,42 +9,8 @@ module pipelinedhash (
     output valid_out                    //Valid output when hash is computed
 );
 
-    //Helper functions for sha256 ops
-    //Big sigma and small sigma functions
-    function automatic [31:0] bigsigma0(input [31:0] x);
-        return {x[1:0], x[31:2]} ^ {x[12:0], x[31:13]} ^ {x[21:0], x[31:22]};
-    endfunction
-
-    function automatic [31:0] bigsigma1(input [31:0] x);
-        return {x[5:0], x[31:6]} ^ {x[10:0], x[31:11]} ^ {x[24:0], x[31:25]};
-    endfunction
-
-    function automatic [31:0] smallsigma0(input [31:0] x);
-        return {x[6:0], x[31:7]} ^ {x[17:0], x[31:18]} ^ {3'b0,x[31:3]};
-    endfunction
-
-    function automatic [31:0] smallsigma1(input [31:0] x);
-        return {x[16:0], x[31:17]} ^ {x[18:0], x[31:19]} ^ {10'b0, x[31:10]};
-    endfunction
-
-    //Maj and Ch functions
-    function automatic [31:0] maj(input [31:0] x, input [31:0] y, input [31:0] z);
-        return (x & y) ^ (x & z) ^ (y & z);
-    endfunction
-
-    function automatic [31:0] ch(input [31:0] x, input [31:0] y, input [31:0] z);
-        return (x & y) ^ (~x & z);
-    endfunction
-
-    //SHA256 initial hash values    
-    localparam SHA256_H0_0 = 32'h6a09e667;
-    localparam SHA256_H0_1 = 32'hbb67ae85;
-    localparam SHA256_H0_2 = 32'h3c6ef372;
-    localparam SHA256_H0_3 = 32'ha54ff53a;
-    localparam SHA256_H0_4 = 32'h510e527f;
-    localparam SHA256_H0_5 = 32'h9b05688c;
-    localparam SHA256_H0_6 = 32'h1f83d9ab;
-    localparam SHA256_H0_7 = 32'h5be0cd19;
+    //Use custom adder for critical path
+    `define CUSTOM_ADDER
 
     // SHA-256 round constants K[0..63]
     localparam logic [31:0] K [0:63] = '{
@@ -109,9 +75,74 @@ module pipelinedhash (
     generate
         for (genvar i = 0; i < 64; i++) begin : PIPELINE_STAGE
             localparam logic [31:0] Ki = K[i];
+            logic [31:0] s1, c1, s2, c2, s3, c3, T1, T2;
 
+            // SHA-256 ops as intermediate wires (avoids function-scoping issues)
+            logic [31:0] bsig0_a, bsig1_e, ch_val, maj_val, ssig0_w1, ssig1_w14;
+
+            assign bsig1_e = {stage_in[i].e[5:0],  stage_in[i].e[31:6]}
+                           ^ {stage_in[i].e[10:0], stage_in[i].e[31:11]}
+                           ^ {stage_in[i].e[24:0], stage_in[i].e[31:25]};
+
+            assign ch_val  = (stage_in[i].e & stage_in[i].f)
+                           ^ (~stage_in[i].e & stage_in[i].g);
+
+            assign bsig0_a = {stage_in[i].a[1:0],  stage_in[i].a[31:2]}
+                           ^ {stage_in[i].a[12:0], stage_in[i].a[31:13]}
+                           ^ {stage_in[i].a[21:0], stage_in[i].a[31:22]};
+
+            assign maj_val = (stage_in[i].a & stage_in[i].b)
+                           ^ (stage_in[i].a & stage_in[i].c)
+                           ^ (stage_in[i].b & stage_in[i].c);
+
+            assign ssig1_w14 = {stage_in[i].w14[16:0], stage_in[i].w14[31:17]}
+                             ^ {stage_in[i].w14[18:0], stage_in[i].w14[31:19]}
+                             ^ {10'b0, stage_in[i].w14[31:10]};
+
+            assign ssig0_w1 = {stage_in[i].w1[6:0],  stage_in[i].w1[31:7]}
+                            ^ {stage_in[i].w1[17:0], stage_in[i].w1[31:18]}
+                            ^ {3'b0, stage_in[i].w1[31:3]};
+
+            `ifdef CUSTOM_ADDER
+                CSA32 #(32) csa1 ( .a(stage_in[i].h), .b(bsig1_e), .c(ch_val), .sum(s1), .carry(c1) );
+                CSA32 #(32) csa2 ( .a(s1), .b(Ki), .c(stage_in[i].w0), .sum(s2), .carry(c2) );
+                CSA32 #(32) csa3 ( .a(s2), .b(c1 << 1), .c(c2 << 1), .sum(s3), .carry(c3) );
+                assign T1 = s3 + (c3 << 1);
+                assign T2 = bsig0_a + maj_val;
+            `else
+                assign T1 = stage_in[i].h + bsig1_e + ch_val + Ki + stage_in[i].w0;
+                assign T2 = bsig0_a + maj_val;
+            `endif
+            
             always_ff @(posedge clk or negedge reset_n) begin
-                if (!reset_n | flush) begin
+                if (!reset_n) begin
+                    stage_out[i].w0 <= 32'b0;
+                    stage_out[i].w1 <= 32'b0;
+                    stage_out[i].w2 <= 32'b0;
+                    stage_out[i].w3 <= 32'b0;
+                    stage_out[i].w4 <= 32'b0;
+                    stage_out[i].w5 <= 32'b0;
+                    stage_out[i].w6 <= 32'b0;
+                    stage_out[i].w7 <= 32'b0;
+                    stage_out[i].w8 <= 32'b0;
+                    stage_out[i].w9 <= 32'b0;
+                    stage_out[i].w10 <= 32'b0;
+                    stage_out[i].w11 <= 32'b0;
+                    stage_out[i].w12 <= 32'b0;
+                    stage_out[i].w13 <= 32'b0;
+                    stage_out[i].w14 <= 32'b0;
+                    stage_out[i].w15 <= 32'b0;
+                    stage_out[i].a <= 32'b0;
+                    stage_out[i].b <= 32'b0;
+                    stage_out[i].c <= 32'b0;
+                    stage_out[i].d <= 32'b0;
+                    stage_out[i].e <= 32'b0;
+                    stage_out[i].f <= 32'b0;
+                    stage_out[i].g <= 32'b0;
+                    stage_out[i].h <= 32'b0;
+                    stage_out[i].valid <= 0;
+                end
+                else if (flush) begin
                     stage_out[i].w0 <= 32'b0;
                     stage_out[i].w1 <= 32'b0;
                     stage_out[i].w2 <= 32'b0;
@@ -139,8 +170,6 @@ module pipelinedhash (
                     stage_out[i].valid <= 0;
                 end
                 else begin
-                    //Message schedule logic
-                    //16 wide sliding windows 
                     stage_out[i].w0 <= stage_in[i].w1;
                     stage_out[i].w1 <= stage_in[i].w2;
                     stage_out[i].w2 <= stage_in[i].w3;
@@ -156,28 +185,24 @@ module pipelinedhash (
                     stage_out[i].w12 <= stage_in[i].w13;
                     stage_out[i].w13 <= stage_in[i].w14;
                     stage_out[i].w14 <= stage_in[i].w15;
-                    stage_out[i].w15 <= smallsigma1(stage_in[i].w14) + stage_in[i].w9 + smallsigma0(stage_in[i].w1) + stage_in[i].w0;
+                    stage_out[i].w15 <= ssig1_w14 + stage_in[i].w9 + ssig0_w1 + stage_in[i].w0;
 
-                    //Working variables logic a-h
-                    //TODO a reg is probably critical path
-                    stage_out[i].a <= stage_in[i].h + bigsigma1(stage_in[i].e) + ch(stage_in[i].e, stage_in[i].f, stage_in[i].g) + Ki + stage_in[i].w0 + bigsigma0(stage_in[i].a) + maj(stage_in[i].a, stage_in[i].b, stage_in[i].c);
+                    stage_out[i].a <= T1 + T2;
                     stage_out[i].b <= stage_in[i].a;
                     stage_out[i].c <= stage_in[i].b;
                     stage_out[i].d <= stage_in[i].c;
-                    stage_out[i].e <= stage_in[i].d + stage_in[i].h + bigsigma1(stage_in[i].e) + ch(stage_in[i].e, stage_in[i].f, stage_in[i].g) + Ki + stage_in[i].w0;
+                    stage_out[i].e <= stage_in[i].d + T1;
                     stage_out[i].f <= stage_in[i].e;
                     stage_out[i].g <= stage_in[i].f;
                     stage_out[i].h <= stage_in[i].g;
 
-                    //Valid
                     stage_out[i].valid <= stage_in[i].valid;
-
                 end
             end
 
 
             //Special case for last stage
-            if (i < 63) begin
+            if (i < 63) begin : PIPELINE_STAGE_NEXT
                 assign stage_in[i+1] = stage_out[i];
             end
         end
@@ -199,5 +224,5 @@ module pipelinedhash (
     assign valid_out = stage_out[63].valid;
 
 
-endmodule   
+endmodule
     

@@ -1,7 +1,7 @@
 module pipeline_tb;
 
     logic clk;
-    logic reset;
+    logic reset_n;
     logic [511:0] message_block_in;
     logic [255:0] midstate_hash;
     logic flush;
@@ -39,7 +39,7 @@ module pipeline_tb;
 
     pipelinedhash pipeline_inst(
         .clk(clk),
-        .reset(reset),
+        .reset_n(reset_n),
         .message_block_in(message_block_in),
         .midstate_hash(midstate_hash),
         .flush(flush),
@@ -50,11 +50,11 @@ module pipeline_tb;
 
     initial begin
         clk = 0;
-        reset = 0;
+        reset_n = 0;
         valid_in = 0;
         message_block_in = 0;
         midstate_hash = 0;
-        #10 reset = 1;
+        #10 reset_n = 1;
         midstate_hash = DEFAULT_HASH;
 
         for (int i = 0; i < NUM_TESTS; i++) begin
@@ -71,7 +71,7 @@ module pipeline_tb;
     initial begin
         int result_count = 0;
         int fail_count = 0;
-        wait (reset); // Wait for reset to complete
+        wait (reset_n); // Wait for reset to complete
         forever begin
             @(posedge clk);
             if (valid_out) begin
